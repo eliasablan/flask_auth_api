@@ -1,10 +1,12 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, make_response
 from flask_sqlalchemy import SQLAlchemy
+from flask_marshmallow import Marshmallow
 import uuid
 from werkzeug.security import generate_password_hash, check_password_hash
-
-from flask_marshmallow import Marshmallow
+import jwt
 import os
+import datetime
+from functools import wraps
 
 app = Flask(__name__)
 basedir = os.path.abspath(os.path.dirname(__file__))
@@ -28,8 +30,33 @@ class Todo(db.Model):
     complete = db.Column(db.Boolean)
     user_id = db.Column(db.Integer)
 
-@app.route('/user', methods=['GET'])
-def get_all_users():
+def token_required(f):
+    wraps(f)
+    def wrapper(*args, **kwargs):
+        token = None
+
+        if 'x-access-token' in request.headers:
+            token = request.headers['x-access-token']
+
+        if not token:
+            return jsonify({'message' : 'Token is missing!'}), 401
+
+        try:
+            data = jwt.decode(token, app.config['SECRET_KEY'])
+            current_user = User.query.filter_by(public_id=data['public_id']).first()
+        except:
+            return jsonify({'message' : 'Token is invalid!'}), 401
+        
+        return f(current_user, *args, **kwargs)
+    
+    return wrapper
+
+@app.route('/user', endpoint='get_all_users', methods=['GET'])
+@token_required
+def get_all_users(current_user):
+    if not current_user.admin:
+        return jsonify({'message' : 'Cannot perform that action with your current permisions!'})
+    
     users = User.query.all()
 
     output = []
@@ -44,8 +71,12 @@ def get_all_users():
 
     return jsonify({'users' : output})
 
-@app.route('/user/<public_id>', methods=['GET'])
-def get_one_user(public_id):
+@app.route('/user/<public_id>', endpoint='get_one_user', methods=['GET'])
+@token_required
+def get_one_user(current_user, public_id):
+    if not current_user.admin:
+        return jsonify({'message' : 'Cannot perform that action with your current permisions!'})
+    
     user = User.query.filter_by(public_id=public_id).first()
 
     if not user:
@@ -59,8 +90,12 @@ def get_one_user(public_id):
     
     return jsonify({'user' : user_data})
 
-@app.route('/user', methods=['POST'])
-def create_user():
+@app.route('/user', endpoint='create_user', methods=['POST'])
+@token_required
+def create_user(current_user):
+    if not current_user.admin:
+        return jsonify({'message' : 'Cannot perform that action with your current permisions!'})
+    
     data = request.get_json()
 
     hashed_password = generate_password_hash(data['password'], method='sha256')
@@ -71,8 +106,12 @@ def create_user():
 
     return jsonify({'message' : 'New user created'})
 
-@app.route('/user/<public_id>', methods=['PUT'])
-def promote_user(public_id):
+@app.route('/user/<public_id>', endpoint='promote_user', methods=['PUT'])
+@token_required
+def promote_user(current_user, public_id):
+    if not current_user.admin:
+        return jsonify({'message' : 'Cannot perform that action with your current permisions!'})
+    
     user = User.query.filter_by(public_id=public_id).first()
 
     if not user:
@@ -83,8 +122,12 @@ def promote_user(public_id):
 
     return jsonify({'message' : 'The user has been promoted'})
 
-@app.route('/user/<public_id>', methods=['DELETE'])
-def delete_user(public_id):
+@app.route('/user/<public_id>', endpoint='delete_user', methods=['DELETE'])
+@token_required
+def delete_user(current_user, public_id):
+    if not current_user.admin:
+        return jsonify({'message' : 'Cannot perform that action with your current permisions!'})
+    
     user = User.query.filter_by(public_id=public_id).first()
 
     if not user:
@@ -93,6 +136,110 @@ def delete_user(public_id):
     db.session.delete(user)
     db.session.commit()
     return jsonify({'message' : 'The user has been deleted!'})
+
+@app.route('/login')
+def login():
+    auth = request.authorization
+
+    if not auth or not auth.username or not auth.password:
+        return make_response('Could not verify', 401, {'WWW-Authenticate' : 'Basic realm="Login Required!"'})
+    
+    user = User.query.filter_by(name=auth.username).first()
+
+    if not user:
+        return make_response('Could not verify', 401, {'WWW-Authenticate' : 'Basic realm="Login Required!"'})
+    
+    if check_password_hash(user.password, auth.password):
+        token = jwt.encode({'public_id' : user.public_id, 'exp' : datetime.datetime.utcnow() + datetime.timedelta(minutes=30)}, app.config['SECRET_KEY'])
+
+        return jsonify({'token' : token.decode('UTF-8')})
+    
+    return make_response('Could not verify', 401, {'WWW-Authenticate' : 'Basic realm="Login Required!"'})
+
+@app.route('/todo', endpoint='get_all_todos', methods=['GET'])
+@token_required
+def get_all_todos(current_user):
+    if not current_user.admin:
+        return jsonify({'message' : 'Cannot perform that action with your current permisions!'})
+    
+    todos = Todo.query.all()
+
+    output = []
+
+    for todo in todos:
+        todo_data = {}
+        todo_data['id'] = todo.id
+        todo_data['text'] = todo.text
+        todo_data['complete'] = todo.complete
+        todo_data['user_id'] = todo.user_id
+        output.append(todo_data)
+
+    return jsonify({'todos' : output})
+
+@app.route('/todo/<todo_id>', endpoint='get_one_todo', methods=['GET'])
+@token_required
+def get_one_todo(current_user, todo_id):
+    if not current_user.admin:
+        return jsonify({'message' : 'Cannot perform that action with your current permisions!'})
+    
+    todo = Todo.query.filter_by(id=todo_id).first()
+
+    if not todo:
+        return jsonify({'message' : 'No TO DO found'})
+    
+    todo_data = {}
+    todo_data['id'] = todo.id
+    todo_data['text'] = todo.text
+    todo_data['complete'] = todo.complete
+    todo_data['user_id'] = todo.user_id
+    
+    return jsonify({'todo' : todo_data})
+
+@app.route('/todo', endpoint='create_todo', methods=['POST'])
+@token_required
+def create_todo(current_user):
+    if not current_user.admin:
+        return jsonify({'message' : 'Cannot perform that action with your current permisions!'})
+    
+    data = request.get_json()
+    
+    new_todo = Todo(text=data['text'], complete=False, user_id=current_user.id)
+    db.session.add(new_todo)
+    db.session.commit()
+
+    return jsonify({'message' : 'New TO DO created'})
+
+@app.route('/todo/<todo_id>', endpoint='complete_todo', methods=['PUT'])
+@token_required
+def complete_todo(current_user, todo_id):
+    if not current_user.admin:
+        return jsonify({'message' : 'Cannot perform that action with your current permisions!'})
+    
+    todo = Todo.query.filter_by(id=todo_id).first()
+
+    if not todo:
+        return jsonify({'message' : 'No TO DO found'})
+
+    todo.complete = True
+    db.session.commit()
+
+    return jsonify({'message' : 'The TO DO has been completed'})
+
+@app.route('/todo/<todo_id>', endpoint='delete_todo', methods=['DELETE'])
+@token_required
+def delete_todo(current_user, todo_id):
+    if not current_user.admin:
+        return jsonify({'message' : 'Cannot perform that action with your current permisions!'})
+    
+    todo = Todo.query.filter_by(id=todo_id).first()
+
+    if not todo:
+        return jsonify({'message' : 'No TO DO found'})
+
+    db.session.delete(todo)
+    db.session.commit()
+    return jsonify({'message' : 'The TO DO has been deleted!'})
+
 
 if __name__ == '__main__':
     app.run(debug=True)
